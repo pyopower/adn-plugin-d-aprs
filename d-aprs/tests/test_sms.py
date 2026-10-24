@@ -54,6 +54,9 @@ def test_parse_commands() -> None:
     assert cmd.parse(" test ") == cmd.Command("test")
     assert cmd.parse("?").kind == "help"
     assert cmd.parse("hello").kind == "unknown"
+    assert cmd.parse("@MHJN02SM") == cmd.Command("locator", "JN02SM")  # without the space
+    assert cmd.parse("@SSID9") == cmd.Command("ssid", "9")
+    assert cmd.parse("@COMportable") == cmd.Command("comment", "portable")
 
 
 def test_locator_centre() -> None:

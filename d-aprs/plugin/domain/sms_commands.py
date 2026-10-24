@@ -61,6 +61,10 @@ def parse(text: str) -> Command:
         return Command("message", body[:APRS_MESSAGE_MAX], m.group(1).upper()) if body else Command("invalid", "message")
     word, _, rest = t.partition(" ")
     word, rest = word.upper(), rest.strip()
+    for prefix in ("@SSID", "@ICON", "@COM", "@MH"):  # also without the space, as hbnet took them
+        if word.startswith(prefix) and word != prefix:
+            word, rest = prefix, t.strip()[len(prefix):].strip()
+            break
     if word == "@SSID":
         return Command("ssid", rest) if _SSID.fullmatch(rest) else Command("invalid", "ssid")
     if word == "@ICON":

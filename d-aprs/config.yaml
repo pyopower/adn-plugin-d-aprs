@@ -1,0 +1,64 @@
+enabled: false
+
+# D-APRS: positions of DMR radios to APRS-IS.
+#  - Packet data sent to data_dmr_id: MOTOTRBO (ARS/LRRP) and Hytera (RRS/LP). The
+#    plugin answers the radios (registration, periodic location request), which needs
+#    an entry in the server config:
+#      PLUGINS:
+#        send:
+#          d-aprs:
+#            allowed_src_ids: [900999]      # = data_dmr_id
+#  - GPS in the voice call (OpenGD77 and others sending GPS Info in the embedded LC).
+# Don't run another gateway (D-APRS/hbnet, gps-lc-aprs) on the same IDs: positions
+# and answers would go out twice.
+
+# The DMR ID radios send their data to ("GPS/ARS server" / "Control Center ID").
+data_dmr_id: 900999
+
+# APRS-IS login of this igate. Positions are decoded and logged without it,
+# but only sent once login and passcode are set.
+aprs_is:
+  server: rotate.aprs2.net
+  port: 14580
+  login: N0CALL-12          # your call + an SSID not used by other gateways
+  passcode: "-1"
+
+# Defaults for every station; a station can override call/ssid/icon/comment.
+default_ssid: "15"
+symbol_table: "/"
+symbol: "["                 # "[" = person
+comment: D-APRS ADN Systems
+tocall: APHBL3
+timestamp: none             # none ("!", usual on digital) | gps (fix time sent by the radio) | server
+min_interval_s: 20          # at most one report per callsign in this time
+
+motorola:
+  enabled: true
+  request_location: true    # ask each registering radio for a report every 60 s
+  preambles: 1
+
+hytera:
+  enabled: true
+  # Asked to each radio when it registers (power on) and again every rerequest_s.
+  interval_s: 30            # 0 = only what the radio sends by itself
+  trigger: time             # time | distance | distance_or_time | distance_and_time
+  distance_m: 100
+  radio_intervals: {}       # per DMR ID, e.g. {7149999: 30, 2139999: 120}
+  rerequest_s: 600
+  reply_delay_s: 8          # the radio repeats its packet 3-4 s later; answer after that
+  preambles: 1              # CSBK preambles before each packet to the radio
+  link_ack: false           # SARQ ACK: only reaches the radio in time from a nearby server
+
+voice_gps:
+  enabled: true
+  stream_ttl_s: 12
+  # NMEA RMC positions in packet data (Anytone type radios), read when sent to these IDs.
+  nmea_data_dmr_ids: []
+
+# Optional: the D-APRS user settings file (same format), relative to the
+# server root or absolute, so users keep the ssid/icon/comment they set there.
+user_settings_file: ""
+
+# Optional: per DMR ID overrides, on top of user_settings_file.
+stations: {}
+#  2130035: {call: C31AG, ssid: "9", icon: "/>", comment: "mobile"}

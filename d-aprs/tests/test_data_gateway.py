@@ -290,3 +290,16 @@ def test_waits_while_the_radio_is_transmitting() -> None:
     assert h.sent == []  # held back
     h.run(until=h.now + 5.0)
     assert h.sent and len(_packets(h.sent)) == 1
+
+
+def test_two_radios_of_one_operator_with_different_ssids_are_both_reported() -> None:
+    from plugin.application.position_use_case import PositionUseCase, Settings
+    from plugin.domain.gps_lc import GpsFix
+
+    sent: list[str] = []
+    uc = PositionUseCase(Settings(stations={1: {"call": "N0TEST", "ssid": "9"}, 2: {"call": "N0TEST", "ssid": "7"}},
+                                  min_interval_s=20), sent.append)
+    uc.on_position(1, None, GpsFix(42.5, 1.5), 1000.0)
+    uc.on_position(2, None, GpsFix(42.5, 1.5), 1005.0)
+    uc.on_position(2, None, GpsFix(42.5, 1.5), 1010.0)  # same station within 20 s: held back
+    assert [line.split(">")[0] for line in sent] == ["N0TEST-9", "N0TEST-7"]

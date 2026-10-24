@@ -63,6 +63,12 @@ class _Stream:
     data: DataPacketAssembler = field(default_factory=DataPacketAssembler)
 
 
+def _source(station: Station) -> str:
+    """The APRS station a report goes out as: the rate limit applies per station, so two
+    radios of one operator with different SSIDs don't hold each other back."""
+    return f"{station.callsign}-{station.ssid}" if station.ssid else station.callsign
+
+
 class PositionUseCase:
     """Decodes GPS Info LCs per stream and reports each station at most every ``min_interval_s``."""
 
@@ -146,9 +152,9 @@ class PositionUseCase:
         if station is None:
             return False
         stream.pending = None
-        if now - self._last_sent.get(station.callsign, 0.0) < self._settings.min_interval_s:
+        if now - self._last_sent.get(_source(station), 0.0) < self._settings.min_interval_s:
             return True
-        self._last_sent[station.callsign] = now
+        self._last_sent[_source(station)] = now
         course, speed = (rmc.course_deg, rmc.speed_knots) if rmc is not None else (None, None)
         self._send(position_report(station, fix, stream.src_id, self._when(now, None), self._settings.tocall,
                                    course, speed))
@@ -170,9 +176,9 @@ class PositionUseCase:
             logger.info("(D-APRS) src %s sent a position but no callsign is known, not reported", src_id)
             return False
         logger.info("(D-APRS) position of %s (%s) at %.5f, %.5f", src_id, station.callsign, fix.latitude, fix.longitude)
-        if now - self._last_sent.get(station.callsign, 0.0) < self._settings.min_interval_s:
+        if now - self._last_sent.get(_source(station), 0.0) < self._settings.min_interval_s:
             return True
-        self._last_sent[station.callsign] = now
+        self._last_sent[_source(station)] = now
         self._send(position_report(station, fix, src_id, self._when(now, gps_time), self._settings.tocall,
                                    course_deg, speed_knots))
         return True

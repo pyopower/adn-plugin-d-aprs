@@ -214,7 +214,9 @@ class DataGateway:
         elif msg.port == moto.PORT_LRRP:
             report = moto.lrrp_report(msg.payload)
             if report is None:
-                logger.info("(D-APRS) MOTOTRBO LRRP from %s without a fix: %s", radio, msg.payload.hex())
+                kind = {0x0B: "answer to the location request", 0x0D: "report without a fix",
+                        0x07: "immediate report without a fix"}.get(msg.payload[0] if msg.payload else -1, "message")
+                logger.info("(D-APRS) MOTOTRBO LRRP %s from %s: %s", kind, radio, msg.payload.hex())
                 return
             self._on_position(Position(radio, report.latitude, report.longitude, "motorola",
                                        course_deg=report.course_deg, speed_knots=report.speed_knots))

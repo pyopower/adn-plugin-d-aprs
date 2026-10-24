@@ -10,6 +10,8 @@ GPS positions of DMR radios, whichever way they report them:
 | **OpenGD77 and other ETSI radios** | GPS Info LC embedded in voice calls | Decodes it on any talkgroup (passive) |
 | **Anytone type radios** | NMEA `$GPRMC` in unconfirmed packet data | Decodes it (optional, `voice_gps.nmea_data_dmr_ids`) |
 
+Users set their APRS station **by SMS** to the gateway ID, with the D-APRS commands (see [SMS commands](#sms-commands)).
+
 It replaces the standalone hbnet `gps_data.py` D-APRS gateway (and the `gps-lc-aprs` plugin, which it
 includes): no extra peer, no `[D-APRS]` system, one APRS-IS connection, and answers to the radios go
 out from the server itself through `ServerContext.send_dmrd`.
@@ -61,6 +63,26 @@ updating the plugin files, restart the server.
   `data_dmr_id`, default ports (RRS 3002, Location 3003, TMS 5016).
 - **OpenGD77:** GPS on and "send in voice" (no gateway ID needed).
 
+## SMS commands
+
+Sent as a private text message to `data_dmr_id`, in any of the formats radios use: MOTOTRBO TMS
+(UDP 4007), "DMR standard" (UDP 5016: Hytera, Anytone, TYT...) or Hytera TMP (HDAP, in short data
+or over UDP 5016). The gateway acknowledges the message when the radio asks for it and answers in
+the same format.
+
+| SMS | Effect |
+|-----|--------|
+| `@SSID 9` | APRS SSID of this radio (1-15) |
+| `@ICON />` | APRS symbol: table (`/`, `\` or an overlay) + symbol |
+| `@COM text` | Position comment, up to 35 characters (`@COM` alone clears it) |
+| `@APRS` | Back to the gateway defaults |
+| `@MH JN02SM` | Report a position by Maidenhead locator (4, 6 or 8 characters) |
+| `@EA1ABC-7 A-text` | APRS message to EA1ABC-7 (up to 67 characters) |
+| `ID` / `TEST` / `HELP` | Station the radio reports as / gateway alive / command list |
+
+Settings are saved to `user_settings_file` (hbnet D-APRS format, so an existing file keeps working)
+and apply at once. A field also set under `stations` in the config wins over the SMS (the answer says so).
+
 ## Configuration (`config.yaml`)
 
 | Key | Default | Role |
@@ -88,7 +110,11 @@ updating the plugin files, restart the server.
 | `hytera.link_ack` | `false` | SARQ ACK of each report. The radio retries ~0.5 s after its last block: only a server close to the hotspot answers in time |
 | `voice_gps.enabled` | `true` | GPS in voice calls |
 | `voice_gps.nmea_data_dmr_ids` | `[]` | Gateway IDs whose packet data is read for NMEA positions |
-| `user_settings_file` | empty | hbnet D-APRS `user_settings.txt`, so users keep their ssid/icon/comment |
+| `sms.enabled` | `true` | SMS commands |
+| `sms.replies` | `true` | Answer each command with an SMS |
+| `sms.language` | `en` | Answers in `en` or `es` |
+| `sms.max_per_hour` | `20` | Commands per radio and hour; more are ignored |
+| `user_settings_file` | `data/d-aprs/user_settings.txt` | Station settings set by SMS (hbnet D-APRS format). Empty: kept until a restart |
 | `stations` | `{}` | Per DMR ID `call` / `ssid` / `icon` / `comment`, on top of the file |
 
 **Callsign** of a position, in order: the station's `call` override → the server's subscriber alias
@@ -107,6 +133,7 @@ as the server delivered them; MOTOTRBO vectors come from real ARS registrations 
 ## References
 
 - ETSI TS 102 361-1 (data headers, BPTC, rate 3/4 trellis, CRCs) and 102 361-3 (packet data).
-- Hytera location protocol message layout: [OK-DMR/dmr-kaitai](https://github.com/OK-DMR/dmr-kaitai)
-  (`location_protocol.ksy`).
+- Hytera location and text message protocol layouts: [OK-DMR/dmr-kaitai](https://github.com/OK-DMR/dmr-kaitai)
+  (`location_protocol.ksy`, `text_message_protocol.ksy`).
+- MOTOTRBO TMS layout: Moto.Net and node-dmr-lib; SMS commands as in hbnet D-APRS (KF7EEL).
 - MOTOTRBO ARS/LRRP behaviour as captured from BrandMeister and real radios (hbnet D-APRS, C31AG).

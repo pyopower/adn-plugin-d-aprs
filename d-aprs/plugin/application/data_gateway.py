@@ -18,10 +18,12 @@
 #   Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 ###############################################################################
 
-"""Packet data sent to the gateway's DMR ID: MOTOTRBO (ARS/LRRP) and Hytera (RRS/LP).
+"""Packet data sent to the gateway's DMR ID: MOTOTRBO (ARS/LRRP/TMS) and Hytera (RRS/LP/TMP).
 
 Reassembles each packet, answers the radio the way BrandMeister does (registration,
-periodic location request, link layer ACK) and hands every location to ``on_position``.
+periodic location request, link layer ACK) and hands every location to ``on_position``
+and every text message to ``on_sms``; ``send_text`` answers in the format the radio used
+(MOTOTRBO TMS, "DMR standard" UDP 5016 or Hytera TMP).
 Replies go out one packet after another: two streams on one slot reach no radio.
 """
 
@@ -120,6 +122,7 @@ class DataGateway:
         call_later: Callable[..., object],
         on_position: Callable[[Position], None],
         clock: Callable[[], float] = time.time,
+        on_sms: Callable[[int, str], None] | None = None,
     ) -> None:
         self._s = settings
         self._send = send
@@ -134,6 +137,11 @@ class DataGateway:
         self._hyt_seen: dict[tuple[int, str], float] = {}
         self._sd_prefix = dict(hdap.DEFAULT_SD_PREFIX)
         self._last_rx: dict[int, float] = {}  # radio -> last time we heard it
+        self._on_sms = on_sms
+        self._sms_format: dict[int, tuple[str, int, int]] = {}  # radio -> (format, slot, address net)
+        self._hyt_texts: dict[tuple[int, int], float] = {}  # (radio, request ID) -> when
+        self._tms_seq = 0
+        self._tmp_id = 0
 
     def update_settings(self, settings: GatewaySettings) -> None:
         self._s = settings
@@ -221,9 +229,30 @@ class DataGateway:
             self._on_position(Position(radio, report.latitude, report.longitude, "motorola",
                                        course_deg=report.course_deg, speed_knots=report.speed_knots))
         elif msg.port == moto.PORT_TMS:
-            text = moto.tms_text(msg.payload)
-            if text:
-                logger.info("(D-APRS) MOTOTRBO text from %s: %r", radio, text)
+            tms = moto.tms_parse(msg.payload)
+            if tms is None:
+                return
+            if tms.is_ack:
+                logger.info("(D-APRS) MOTOTRBO %s acknowledged our text (seq %d)", radio, tms.sequence)
+                return
+            if tms.ack_required:
+                self._motorola_send(radio, moto.PORT_TMS, moto.tms_ack(tms.sequence), slot, msg.dst_net)
+            self._sms_format[radio] = ("tms", slot, msg.dst_net)
+            self._text_in(radio, tms.text)
+        elif msg.port == moto.PORT_DMR_STANDARD_SMS:
+            text = moto.standard_sms_parse(msg.payload)
+            if text is not None:
+                self._sms_format[radio] = ("standard", slot, msg.dst_net)
+                self._text_in(radio, text)
+                return
+            found = hdap.find(msg.payload)  # Hytera TMP over UDP 5016
+            tm = hdap.text_message(found[0]) if found else None
+            if tm is not None:
+                if tm.ack_required:
+                    ack = hdap.text_ack(tm.request_id, radio, self._s.data_dmr_id)
+                    self._motorola_send(radio, moto.PORT_DMR_STANDARD_SMS, ack, slot, msg.dst_net)
+                self._sms_format[radio] = ("hytera-ip", slot, msg.dst_net)
+                self._text_in(radio, tm.text)
 
     def _motorola_request(self, radio: int, slot: int) -> None:
         now = self._clock()
@@ -233,10 +262,10 @@ class DataGateway:
         logger.info("(D-APRS) MOTOTRBO periodic location request -> %s", radio)
         self._motorola_send(radio, moto.PORT_LRRP, moto.LRRP_TRIGGERED_START, slot)
 
-    def _motorola_send(self, radio: int, port: int, payload: bytes, slot: int) -> None:
+    def _motorola_send(self, radio: int, port: int, payload: bytes, slot: int, src_net: int = moto.GATEWAY_NET) -> None:
         gw = self._s.data_dmr_id
         self._ip_id = (self._ip_id + 1) & 0xFFFF
-        ip = moto.ip_udp(gw, radio, port, payload, self._ip_id)
+        ip = moto.ip_udp(gw, radio, port, payload, self._ip_id, src_net)
         blocks, pad = build_blocks(ip, rate34=True, confirmed=True)
         header = hd.DataHeader(
             dpf=hd.DPF_CONFIRMED, dst=radio, src=gw, sap=hd.SAP_IP, response_requested=True,
@@ -281,6 +310,18 @@ class DataGateway:
                     logger.info("(D-APRS) Hytera location from %s without a GPS fix", radio)
             self._hytera_request(radio, packet.slot, now)
             return
+        tm = hdap.text_message(msg)
+        if tm is not None:
+            gw = self._s.data_dmr_id
+            if tm.ack_required:
+                self._hytera_send(radio, hdap.text_ack(tm.request_id, radio, gw), packet.slot)
+            key = (radio, tm.request_id)
+            if now - self._hyt_texts.get(key, -1e9) >= 120:  # the radio repeats a text nobody ACKed
+                self._hyt_texts = {k: t for k, t in self._hyt_texts.items() if now - t < 120}
+                self._hyt_texts[key] = now
+                self._sms_format[radio] = ("hytera", packet.slot, 0)
+                self._text_in(radio, tm.text)
+            return
         answer = hdap.condition_answer(msg)
         if answer is not None:
             logger.info("(D-APRS) Hytera %s the periodic request %08x (trigger %d, result %d)",
@@ -301,10 +342,10 @@ class DataGateway:
         self._hytera_send(radio, hdap.condition_request(radio, request_id, interval, s.trigger, s.distance_m), slot)
 
     def _hytera_send(self, radio: int, message: bytes, slot: int) -> None:
-        """Short data like the radio sends it: LP rate 3/4 with SARQ, registration rate 1/2 without."""
+        """Short data like the radio sends it: LP (and TMP) rate 3/4 with SARQ, registration rate 1/2 without."""
         gw = self._s.data_dmr_id
         service = message[0] & 0x7F
-        location = service == hdap.SERVICE_LP
+        location = service in (hdap.SERVICE_LP, hdap.SERVICE_TMP)
         user = bytes([self._sd_prefix.get(service, 0x01), 0x00]) + message
         blocks, pad = build_blocks(user, rate34=location, confirmed=location)
         header = hd.DataHeader(
@@ -313,6 +354,34 @@ class DataGateway:
         ).to_bytes()
         self._queue(data_frames(header, blocks, gw, radio, gw, slot, self._s.hytera.preambles),
                     self._s.hytera.reply_delay_s)
+
+    # ------------------------------------------------------------ text messages
+
+    def _text_in(self, radio: int, text: str) -> None:
+        logger.info("(D-APRS) text from %s (%s): %r", radio, self._sms_format[radio][0], text)
+        if self._on_sms is not None and text:
+            self._on_sms(radio, text)
+
+    def send_text(self, radio: int, text: str) -> bool:
+        """A text to ``radio`` in the format it last wrote to us in; False if it never did."""
+        fmt = self._sms_format.get(radio)
+        if fmt is None or not text:
+            return False
+        kind, slot, net = fmt
+        if kind in ("hytera", "hytera-ip"):
+            self._tmp_id = (self._tmp_id + 1) & 0xFFFFFFFF
+            tmp = hdap.text(self._tmp_id, radio, self._s.data_dmr_id, text)
+            if kind == "hytera":
+                self._hytera_send(radio, tmp, slot)
+            else:
+                self._motorola_send(radio, moto.PORT_DMR_STANDARD_SMS, tmp, slot, net)
+        elif kind == "standard":
+            self._motorola_send(radio, moto.PORT_DMR_STANDARD_SMS, moto.standard_sms(text), slot, net)
+        else:
+            self._tms_seq = (self._tms_seq + 1) & 0x1F
+            self._motorola_send(radio, moto.PORT_TMS, moto.tms_simple_text(text, self._tms_seq), slot, net)
+        logger.info("(D-APRS) text -> %s (%s): %r", radio, kind, text)
+        return True
 
     # ------------------------------------------------------------ output
 

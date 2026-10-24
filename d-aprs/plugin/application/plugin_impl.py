@@ -18,11 +18,13 @@
 #   Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 ###############################################################################
 
-"""ServerPlugin adapter: voice and packet data in, APRS-IS position reports out."""
+"""ServerPlugin adapter: voice and packet data in, APRS-IS position reports out; SMS commands."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import threading
 import time
 from typing import Any
 
@@ -33,9 +35,12 @@ from ..domain.aprs import find_callsign
 from ..domain.gps_lc import GpsFix
 from ..domain.hytera import hdap
 from ..infrastructure.aprs_is import AprsIsClient
-from ..infrastructure.station_settings import load_stations
+from ..infrastructure.station_settings import (
+    merge_stations, read_user_settings, settings_path, write_user_settings,
+)
 from .data_gateway import DataGateway, GatewaySettings, HyteraSettings, MotorolaSettings, Position
 from .position_use_case import PositionUseCase, Settings
+from .sms_use_case import SmsSettings, SmsUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +52,7 @@ _TRIGGERS = {
 }
 
 
-def _settings(config: dict[str, Any], project_root: str) -> Settings:
+def _settings(config: dict[str, Any], stations: dict[int, dict[str, str]]) -> Settings:
     defaults = Settings()
     voice = config.get("voice_gps") or {}
     return Settings(
@@ -60,8 +65,23 @@ def _settings(config: dict[str, Any], project_root: str) -> Settings:
         min_interval_s=float(config.get("min_interval_s", defaults.min_interval_s)),
         stream_ttl_s=float(voice.get("stream_ttl_s", defaults.stream_ttl_s)),
         data_dmr_ids=frozenset(int(i) for i in (voice.get("nmea_data_dmr_ids") or [])),
-        stations=load_stations(config.get("stations"), config.get("user_settings_file"), project_root),
+        stations=stations,
     )
+
+
+def _sms_settings(config: dict[str, Any]) -> SmsSettings:
+    sms, d = config.get("sms") or {}, SmsSettings()
+    return SmsSettings(
+        enabled=bool(sms.get("enabled", d.enabled)),
+        replies=bool(sms.get("replies", d.replies)),
+        language=str(sms.get("language", d.language)).lower(),
+        repeat_window_s=float(sms.get("repeat_window_s", d.repeat_window_s)),
+        max_per_hour=int(sms.get("max_per_hour", d.max_per_hour)),
+    )
+
+
+def _inline_stations(config: dict[str, Any]) -> dict[int, dict[str, str]]:
+    return merge_stations({}, config.get("stations"))
 
 
 def _gateway_settings(config: dict[str, Any]) -> GatewaySettings:
@@ -115,19 +135,33 @@ class DAprsPlugin:
         self._gateway: DataGateway | None = None
         self._voice_gps = True
         self._callsigns: dict[int, str] = {}
+        self._sms: SmsUseCase | None = None
+        self._settings_path = None
+        self._config: dict[str, Any] = {}
+        self._save_lock = threading.Lock()
+        self._to_save: dict[int, dict[str, str]] | None = None
 
     def on_load(self, bus: Any, config: dict[str, Any], server_ctx: Any) -> None:
         del bus
         self._ctx = server_ctx
+        self._config = config
         self._client = _client(config)
-        settings = _settings(config, server_ctx.project_root)
+        self._settings_path = settings_path(config.get("user_settings_file"), server_ctx.project_root)
+        user, inline = read_user_settings(self._settings_path), _inline_stations(config)
+        settings = _settings(config, merge_stations(user, inline))
         self._positions = PositionUseCase(settings, self._send_aprs)
+        self._sms = SmsUseCase(_sms_settings(config), self._positions, user, inline, self._stations_changed,
+                               self._send_aprs, self._reply, settings.tocall)
         self._voice_gps = bool((config.get("voice_gps") or {}).get("enabled", True))
         gw = _gateway_settings(config)
-        self._gateway = DataGateway(gw, self._send_dmrd, server_ctx.call_later, self._on_position)
+        self._gateway = DataGateway(gw, self._send_dmrd, server_ctx.call_later, self._on_position,
+                                    on_sms=self._on_sms)
         if server_ctx.send_dmrd is None:
             logger.warning("(D-APRS) no PLUGINS.send entry: positions are received, but radios get no "
                            "answers (MOTOTRBO/Hytera registration and periodic requests need it)")
+        if self._settings_path is None:
+            logger.warning("(D-APRS) user_settings_file not set: SMS settings (@SSID, @ICON...) last "
+                           "until the server restarts")
         logger.info("(D-APRS) loaded: data ID %d, %d station overrides", gw.data_dmr_id, len(settings.stations))
 
     def on_reload(self, config: dict[str, Any]) -> None:
@@ -135,8 +169,14 @@ class DAprsPlugin:
         self._client = _client(config)
         if old is not None:
             self._ctx.defer_to_thread(old.close)
+        self._config = config
+        self._settings_path = settings_path(config.get("user_settings_file"), self._ctx.project_root)
+        user, inline = read_user_settings(self._settings_path), _inline_stations(config)
+        settings = _settings(config, merge_stations(user, inline))
         if self._positions is not None:
-            self._positions.update_settings(_settings(config, self._ctx.project_root))
+            self._positions.update_settings(settings)
+        if self._sms is not None:
+            self._sms.update(_sms_settings(config), user, inline, settings.tocall)
         if self._gateway is not None:
             self._gateway.update_settings(_gateway_settings(config))
         self._voice_gps = bool((config.get("voice_gps") or {}).get("enabled", True))
@@ -176,6 +216,35 @@ class DAprsPlugin:
         self._positions.on_position(pos.radio_id, self._callsigns.get(pos.radio_id),
                                     GpsFix(pos.latitude, pos.longitude), time.time(), pos.gps_time,
                                     pos.course_deg, pos.speed_knots)
+
+    def _on_sms(self, radio: int, text: str) -> None:
+        if self._sms is not None:
+            self._sms.on_sms(radio, text, self._callsigns.get(radio))
+
+    def _reply(self, radio: int, text: str) -> None:
+        if self._gateway is not None:
+            self._gateway.send_text(radio, text)
+
+    def _stations_changed(self, user: dict[int, dict[str, str]]) -> None:
+        """An SMS changed a station: use it now, save it off the reactor."""
+        if self._positions is not None:
+            merged = merge_stations(user, _inline_stations(self._config))
+            self._positions.update_settings(dataclasses.replace(self._positions.settings, stations=merged))
+        if self._settings_path is not None:
+            self._to_save = user
+            self._ctx.defer_to_thread(self._save, self._settings_path)
+
+    def _save(self, path: Any) -> None:
+        """In a worker thread; always writes the newest settings, whatever order the saves run in."""
+        with self._save_lock:
+            user, self._to_save = self._to_save, None
+            if user is None:
+                return
+            try:
+                write_user_settings(path, user)
+                logger.info("(D-APRS) user settings saved to %s (%d stations)", path, len(user))
+            except OSError as e:
+                logger.warning("(D-APRS) user settings not saved to %s: %s", path, e)
 
     def _send_dmrd(self, frame: bytes) -> None:
         sender = self._ctx.send_dmrd

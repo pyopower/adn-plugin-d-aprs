@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -42,19 +44,48 @@ def _station_entry(raw: Any) -> dict[str, str]:
     return out
 
 
-def load_stations(inline: Any, settings_file: str | None, project_root: str) -> dict[int, dict[str, str]]:
-    """Stations from ``user_settings_file`` (D-APRS format), then ``stations`` in config on top."""
-    stations: dict[int, dict[str, str]] = {}
-    if settings_file:
-        path = Path(settings_file)
-        if not path.is_absolute():
-            path = Path(project_root) / path
-        try:
-            data = ast.literal_eval(path.read_text(encoding="utf-8").strip() or "{}")
-            for dmr_id, raw in (data or {}).items():
-                stations[int(dmr_id)] = _station_entry(raw)
-        except (OSError, ValueError, SyntaxError, TypeError) as e:
-            logger.warning("(D-APRS) user settings not loaded from %s: %s", path, e)
+def settings_path(settings_file: str | None, project_root: str) -> Path | None:
+    if not settings_file:
+        return None
+    path = Path(settings_file)
+    return path if path.is_absolute() else Path(project_root) / path
+
+
+def read_user_settings(path: Path | None) -> dict[int, dict[str, str]]:
+    """Stations of a D-APRS user_settings file; a missing file is an empty one."""
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = ast.literal_eval(path.read_text(encoding="utf-8").strip() or "{}")
+        return {int(dmr_id): _station_entry(raw) for dmr_id, raw in (data or {}).items()}
+    except (OSError, ValueError, SyntaxError, TypeError, AttributeError) as e:
+        logger.warning("(D-APRS) user settings not loaded from %s: %s", path, e)
+        return {}
+
+
+def write_user_settings(path: Path, stations: dict[int, dict[str, str]]) -> None:
+    """Same format as D-APRS: {id: [{'call': ..}, {'ssid': ..}, {'icon': ..}, {'comment': ..}]}.
+    Blocking (call it off the reactor); written to a temporary file and renamed."""
+    data = {dmr_id: [{k: st.get(k, "")} for k in _KEYS] for dmr_id, st in sorted(stations.items())}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(repr(data))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def merge_stations(from_file: dict[int, dict[str, str]], inline: Any) -> dict[int, dict[str, str]]:
+    """``stations`` in the plugin config on top of the user settings file."""
+    stations = {k: dict(v) for k, v in from_file.items()}
     for dmr_id, raw in (inline or {}).items():
         stations.setdefault(int(dmr_id), {}).update(_station_entry(raw))
     return stations
+
+
+def load_stations(inline: Any, settings_file: str | None, project_root: str) -> dict[int, dict[str, str]]:
+    """Stations from ``user_settings_file`` (D-APRS format), then ``stations`` in config on top."""
+    return merge_stations(read_user_settings(settings_path(settings_file, project_root)), inline)

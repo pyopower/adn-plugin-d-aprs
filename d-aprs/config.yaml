@@ -55,9 +55,17 @@ voice_gps:
   # NMEA RMC positions in packet data (Anytone type radios), read when sent to these IDs.
   nmea_data_dmr_ids: []
 
-# Optional: the D-APRS user settings file (same format), relative to the
-# server root or absolute, so users keep the ssid/icon/comment they set there.
-user_settings_file: ""
+# SMS to data_dmr_id (MOTOTRBO TMS, "DMR standard" UDP 5016, Hytera TMP), the D-APRS
+# commands: @SSID 9 | @ICON /> | @COM text | @APRS (reset) | @MH JN02SM | @CALL A-text | ID | TEST | HELP
+sms:
+  enabled: true
+  replies: true             # answer each command with an SMS, in the format the radio used
+  language: en              # en | es
+  max_per_hour: 20          # per radio
+
+# The D-APRS user settings file (same format as hbnet), relative to the server root
+# or absolute: what users set by SMS is saved here. Empty: kept until a restart.
+user_settings_file: data/d-aprs/user_settings.txt
 
 # Optional: per DMR ID overrides, on top of user_settings_file.
 stations: {}

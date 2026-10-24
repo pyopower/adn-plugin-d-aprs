@@ -78,6 +78,10 @@ class PositionUseCase:
         self._streams: dict[int, _Stream] = {}
         self._last_sent: dict[str, float] = {}
 
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
     def update_settings(self, settings: Settings) -> None:
         self._settings = settings
 
@@ -136,6 +140,10 @@ class PositionUseCase:
 
     def _station(self, stream: _Stream) -> Station | None:
         return self._station_for(stream.src_id, stream.callsign_hint)
+
+    def station_for(self, src_id: int, callsign_hint: str | None) -> Station | None:
+        """The APRS station a radio reports as, or None without a callsign."""
+        return self._station_for(src_id, callsign_hint)
 
     def _station_for(self, src_id: int, callsign_hint: str | None) -> Station | None:
         s = self._settings

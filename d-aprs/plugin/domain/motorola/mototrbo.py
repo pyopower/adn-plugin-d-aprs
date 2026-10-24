@@ -54,9 +54,9 @@ def _ones_complement(data: bytes) -> int:
     return ~total & 0xFFFF
 
 
-def ip_udp(src_id: int, dst_id: int, port: int, payload: bytes, ip_id: int) -> bytes:
+def ip_udp(src_id: int, dst_id: int, port: int, payload: bytes, ip_id: int, src_net: int = GATEWAY_NET) -> bytes:
     """Gateway -> radio IPv4/UDP datagram (same port both ends)."""
-    src_ip = bytes([GATEWAY_NET]) + src_id.to_bytes(3, "big")
+    src_ip = bytes([src_net]) + src_id.to_bytes(3, "big")
     dst_ip = bytes([RADIO_NET]) + dst_id.to_bytes(3, "big")
     udp_len = 8 + len(payload)
     ports = port.to_bytes(2, "big") * 2
@@ -76,6 +76,7 @@ class UdpMessage:
     radio_id: int  # from the source address
     port: int  # destination port
     payload: bytes
+    dst_net: int = GATEWAY_NET  # first octet of the address the radio wrote to
 
 
 def parse_ip_udp(packet: bytes) -> UdpMessage | None:
@@ -86,7 +87,7 @@ def parse_ip_udp(packet: bytes) -> UdpMessage | None:
     if total < 28 or total > len(packet):
         return None
     return UdpMessage(int.from_bytes(packet[13:16], "big"), int.from_bytes(packet[22:24], "big"),
-                      bytes(packet[28:total]))
+                      bytes(packet[28:total]), packet[16])
 
 
 def ars_hello(payload: bytes) -> int | None:
@@ -125,6 +126,80 @@ def tms_text(payload: bytes) -> str:
 
 
 # ---------------------------------------------------------------- LRRP
+
+# ------------------------------------------------------------ TMS (text messages)
+#
+#   0-1  length of what follows      2  0xA0 (extension + reserved) | 0x40 ack wanted | type (0 = text)
+#   3    address length (0)          4  0x80 | sequence number      5  0x04 = UCS-2 LE
+#   6..  "\r\n" + text, UTF-16 LE
+# An acknowledgement is 00 03 BF 00 80|seq (control PDU type 0x1F).
+
+TMS_MAX_CHARS = 140
+_TMS_ACK_TYPE = 0x1F
+
+
+@dataclass(frozen=True)
+class TmsMessage:
+    text: str
+    sequence: int
+    ack_required: bool
+    is_ack: bool = False
+
+
+def tms_parse(payload: bytes) -> TmsMessage | None:
+    if len(payload) < 4 or int.from_bytes(payload[:2], "big") != len(payload) - 2:
+        return None
+    flags = payload[2]
+    i = 4 + payload[3]  # after the address field
+    sequence = 0
+    if flags & 0x80 and i < len(payload):  # extension headers: sequence (+ encoding), each 0x80 = one more
+        sequence = payload[i] & 0x1F
+        while i < len(payload) and payload[i] & 0x80:
+            i += 1
+        i += 1
+    if flags & 0x1F == _TMS_ACK_TYPE:
+        return TmsMessage("", sequence, False, True)
+    body = payload[i:]
+    if len(body) % 2:
+        body = body[:-1]
+    text = body.decode("utf-16-le", errors="replace").replace("\x00", "")
+    if text.startswith("\r\n"):
+        text = text[2:]
+    text = text.strip()
+    if not text or any(ord(c) > 0x2FF for c in text):  # misaligned (unexpected header): best ASCII run
+        text = tms_text(payload) or text
+    return TmsMessage(text, sequence, bool(flags & 0x40))
+
+
+def tms_ack(sequence: int) -> bytes:
+    return bytes([0x00, 0x03, 0xBF, 0x00, 0x80 | (sequence & 0x1F)])
+
+
+def tms_simple_text(text: str, sequence: int = 0) -> bytes:
+    body = ("\r\n" + text[:TMS_MAX_CHARS]).encode("utf-16-le")
+    pdu = bytes([0xA0, 0x00, 0x80 | (sequence & 0x1F), 0x04]) + body
+    return len(pdu).to_bytes(2, "big") + pdu
+
+
+# ------------------------------------------------------------ "DMR standard" SMS (UDP 5016)
+# Hytera, Anytone, TYT...: same IPv4/UDP carriage, body 00 0D 00 0A + text UTF-16 LE.
+
+PORT_DMR_STANDARD_SMS = 5016
+_STD_SUB_HEADER = b"\x00\x0d\x00\x0a"
+
+
+def standard_sms_parse(payload: bytes) -> str | None:
+    if not payload.startswith(_STD_SUB_HEADER):
+        return None
+    body = payload[len(_STD_SUB_HEADER):]
+    if len(body) % 2:
+        body = body[:-1]
+    return body.decode("utf-16-le", errors="replace").replace("\x00", "").strip()
+
+
+def standard_sms(text: str) -> bytes:
+    return _STD_SUB_HEADER + text[:TMS_MAX_CHARS].encode("utf-16-le")
+
 
 @dataclass(frozen=True)
 class LrrpReport:

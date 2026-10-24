@@ -102,3 +102,9 @@ def position_report(
         station.comment,
         dmr_id,
     )
+
+
+def message(source: str, addressee: str, text: str, tocall: str) -> str:
+    """APRS-IS message line (no message number: the sender's radio can't take the ack)."""
+    clean = "".join(c for c in text if c not in "|~{")[:67]
+    return "%s>%s,TCPIP*::%-9s:%s" % (source, tocall, addressee.upper()[:9], clean)

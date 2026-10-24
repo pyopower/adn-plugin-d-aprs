@@ -111,6 +111,56 @@ def registration_ack(radio_id: int, valid_s: int, ok: bool = True) -> bytes:
 # ---------------------------------------------------------------- LP
 
 # GPS field: status, hhmmss, ddmmyy, N/S, ddmm.mmmm, E/W, dddmm.mmmm, speed (knots), direction.
+# ------------------------------------------------------------ TMP (text messages)
+# Opcode = flags (bit 7: 0 = ACK wanted, bit 6: option field) + service type.
+# Payload: request ID (4), destination IP (4), source IP (4), text UTF-16 LE.
+# The ACK (0xA2) carries request ID, destination, source and a result (0 = OK).
+
+TMP_PRIVATE_MESSAGE = 0xA1
+TMP_PRIVATE_MESSAGE_ACK = 0xA2
+_TMP_NO_ACK = 0x80
+TMP_MAX_CHARS = 140
+
+
+@dataclass(frozen=True)
+class TextMessage:
+    request_id: int
+    dst_id: int
+    src_id: int
+    text: str
+    ack_required: bool
+
+
+def text_message(msg: Hdap) -> TextMessage | None:
+    if msg.service != SERVICE_TMP or msg.opcode & 0xFF != TMP_PRIVATE_MESSAGE or len(msg.payload) < 12:
+        return None
+    p, option_len = msg.payload, 0
+    if msg.opcode & 0x4000:  # option field: its length first, the option itself after the text
+        option_len, p = int.from_bytes(p[0:2], "big"), p[2:]
+    if len(p) < 12 + option_len:
+        return None
+    start, end = 12, len(p) - option_len
+    body = p[start:end]
+    if len(body) % 2:
+        body = body[:-1]
+    return TextMessage(int.from_bytes(p[0:4], "big"), int.from_bytes(p[5:8], "big"), int.from_bytes(p[9:12], "big"),
+                       body.decode("utf-16-le", errors="replace").replace("\x00", "").strip(),
+                       not msg.opcode & 0x8000)
+
+
+def text_ack(request_id: int, dst_id: int, src_id: int, result: int = 0) -> bytes:
+    """ACK of a private message: to its sender (``dst_id``), from its addressee (``src_id``)."""
+    payload = (request_id & 0xFFFFFFFF).to_bytes(4, "big") + radio_ip(dst_id) + radio_ip(src_id) + bytes([result])
+    return build(SERVICE_TMP, (_TMP_NO_ACK << 8) | TMP_PRIVATE_MESSAGE_ACK, payload)
+
+
+def text(request_id: int, dst_id: int, src_id: int, message: str) -> bytes:
+    """A private message to ``dst_id`` that asks for no ACK."""
+    payload = ((request_id & 0xFFFFFFFF).to_bytes(4, "big") + radio_ip(dst_id) + radio_ip(src_id)
+               + message[:TMP_MAX_CHARS].encode("utf-16-le"))
+    return build(SERVICE_TMP, (_TMP_NO_ACK << 8) | TMP_PRIVATE_MESSAGE, payload)
+
+
 _GPS = re.compile(rb"([AV])(\d{6})(\d{6})([NS])(\d{4}\.\d{4})([EW])(\d{5}\.\d{4})([ 0-9.]{3})?([ 0-9.]{3})?")
 
 

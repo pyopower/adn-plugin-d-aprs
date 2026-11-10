@@ -78,9 +78,9 @@ class _Harness:
     def _call_later(self, delay, fn, *args):
         self.scheduled.append((self.now + delay, fn, args))
 
-    def feed(self, bursts, stream_id: int, src: int = RADIO, dst: int = GATEWAY) -> None:
+    def feed(self, bursts, stream_id: int, src: int = RADIO, dst: int = GATEWAY, slot: int = 2) -> None:
         for dtype, payload in bursts:
-            self.gw.on_frame(stream_id, src, dst, 2, dtype, payload, self.now)
+            self.gw.on_frame(stream_id, src, dst, slot, dtype, payload, self.now)
 
     def run(self, until: float) -> None:
         while True:
@@ -254,10 +254,12 @@ def test_mototrbo_confirmed_packet_gets_link_ack_first() -> None:
                            fsn=hd.FSN_SINGLE_CONFIRMED)
     frames = data_frames(header.to_bytes(), blocks, RADIO, GATEWAY, RADIO, 2)
     h = _Harness()
-    h.feed([(f[15] & 0x0F, f[20:53]) for f in frames], stream_id=5)
+    h.feed([(f[15] & 0x0F, f[20:53]) for f in frames], stream_id=5, slot=1)
     h.run(until=h.now + 1)
     ((ack, _),) = _packets(h.sent)
     assert ack.dpf == hd.DPF_RESPONSE and (ack.response_class, ack.response_type, ack.response_status) == (0, 1, 2)
+    # a lone header, no CSBK preamble (the radio retries an ACK announced by one), on the radio's slot
+    assert [f[15] & 0x8F for f in h.sent] == [6]
 
 
 def test_info_bits_round_trip() -> None:

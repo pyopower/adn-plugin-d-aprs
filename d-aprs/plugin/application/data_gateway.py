@@ -60,7 +60,7 @@ class MotorolaSettings:
     answer_delay_s: float = 4.0  # registration answer after the link ACK, like BrandMeister
     request_delay_s: float = 4.5  # location request after the registration answer
     request_min_gap_s: float = 8.0  # only drop near-simultaneous retries of the same registration
-    preambles: int = 1
+    preambles: int = 1  # before data packets to the radio; never before a link ACK
 
 
 @dataclass(frozen=True)
@@ -199,8 +199,10 @@ class DataGateway:
         msg = moto.parse_ip_udp(user)
         if h.confirmed and h.response_requested:
             ack = hd.response_ack(radio, self._s.data_dmr_id, hd.SAP_IP, h.send_seq).to_bytes()
-            self._queue(data_frames(ack, [], self._s.data_dmr_id, radio, self._s.data_dmr_id, packet.slot,
-                                    s.preambles), s.link_ack_delay_s, listen=False)
+            # No CSBK preamble before the link ACK: the radio sends its own ACKs as a lone header
+            # and ignores an ACK announced by a preamble (it retries the packet).
+            self._queue(data_frames(ack, [], self._s.data_dmr_id, radio, self._s.data_dmr_id, packet.slot, 0),
+                        s.link_ack_delay_s, listen=False)
             logger.info("(D-APRS) MOTOTRBO link ACK -> %s (N(S)=%d)", radio, h.send_seq)
             if msg is not None:
                 self._call_later(s.answer_delay_s, self._motorola_message, msg, packet.slot)

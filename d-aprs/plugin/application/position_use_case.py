@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -51,6 +52,10 @@ class Settings:
     data_dmr_ids: frozenset[int] = frozenset()
     # Per DMR ID: call / ssid / icon (table + symbol) / comment, overriding the above.
     stations: dict[int, dict[str, str]] = field(default_factory=dict)
+    # Put the repeater that heard the radio in the APRS path: "repeaters" (duplex peers),
+    # "all" (hotspots too) or "none" (always TCPIP*).
+    path_via: str = "repeaters"
+    via_ttl_s: float = 120.0
 
 
 @dataclass
@@ -69,6 +74,9 @@ def _source(station: Station) -> str:
     return f"{station.callsign}-{station.ssid}" if station.ssid else station.callsign
 
 
+_VIA_CALLSIGN = re.compile(r"^[A-Z0-9]{3,6}(-[0-9]{1,2})?$")
+
+
 class PositionUseCase:
     """Decodes GPS Info LCs per stream and reports each station at most every ``min_interval_s``."""
 
@@ -77,6 +85,7 @@ class PositionUseCase:
         self._send = send
         self._streams: dict[int, _Stream] = {}
         self._last_sent: dict[str, float] = {}
+        self._heard_via: dict[int, tuple[str, float]] = {}  # src -> (repeater callsign, when)
 
     @property
     def settings(self) -> Settings:
@@ -84,6 +93,21 @@ class PositionUseCase:
 
     def update_settings(self, settings: Settings) -> None:
         self._settings = settings
+
+    def heard_via(self, src_id: int, callsign: str, duplex: bool, now: float) -> None:
+        """The repeater (or hotspot) a radio was last heard through."""
+        mode = self._settings.path_via
+        call = (callsign or "").strip().upper()
+        if mode == "none" or (mode == "repeaters" and not duplex) or not _VIA_CALLSIGN.match(call):
+            self._heard_via.pop(src_id, None)
+            return
+        self._heard_via[src_id] = (call, now)
+
+    def _via(self, src_id: int, now: float) -> str | None:
+        heard = self._heard_via.get(src_id)
+        if heard is None or now - heard[1] > self._settings.via_ttl_s:
+            return None
+        return heard[0]
 
     def on_frame(
         self, stream_id: int, src_id: int, extra: dict[str, Any], dtype_vseq: int, dmrpkt: bytes, now: float
@@ -165,7 +189,7 @@ class PositionUseCase:
         self._last_sent[_source(station)] = now
         course, speed = (rmc.course_deg, rmc.speed_knots) if rmc is not None else (None, None)
         self._send(position_report(station, fix, stream.src_id, self._when(now, None), self._settings.tocall,
-                                   course, speed))
+                                   course, speed, self._via(stream.src_id, now)))
         return True
 
     def on_position(
@@ -188,7 +212,7 @@ class PositionUseCase:
             return True
         self._last_sent[_source(station)] = now
         self._send(position_report(station, fix, src_id, self._when(now, gps_time), self._settings.tocall,
-                                   course_deg, speed_knots))
+                                   course_deg, speed_knots, self._via(src_id, now)))
         return True
 
     def _when(self, now: float, gps_time: str | None) -> datetime | str | None:

@@ -76,12 +76,17 @@ def position_report(
     tocall: str,
     course_deg: float | None = None,
     speed_knots: float | None = None,
+    via: str | None = None,
 ) -> str:
     """One APRS-IS line: position with symbol, course/speed if known, and comment.
 
     ``when``: a datetime or an "hhmmss" UTC string (the fix time a radio sent) for a
     timestamped report, or None for one without timestamp ("!"), as digital gateways
     usually send.
+
+    ``via``: callsign of the repeater that heard the radio. It goes in the path as a
+    used digipeater (``ED3ZAA*``) instead of ``TCPIP*``, as for any RF packet an igate
+    gates: APRS-IS then adds ``qAR,<login>`` and maps can tell which repeater hears where.
     """
     source = f"{station.callsign}-{station.ssid}" if station.ssid else station.callsign
     if when is None:
@@ -90,9 +95,10 @@ def position_report(
         stamp = "@%sh" % when
     else:
         stamp = "@%sh" % when.strftime("%H%M%S")
-    return "%s>%s,TCPIP*:%s%s%s%s%s%s%s DMR %d" % (
+    return "%s>%s,%s:%s%s%s%s%s%s%s DMR %d" % (
         source,
         tocall,
+        f"{via}*" if via else "TCPIP*",
         stamp,
         _aprs_coordinate(fix.latitude, True),
         station.symbol_table,

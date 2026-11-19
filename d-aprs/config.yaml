@@ -31,6 +31,13 @@ comment: D-APRS ADN Systems
 tocall: APHBL3
 timestamp: none             # none ("!", usual on digital) | gps (fix time sent by the radio) | server
 min_interval_s: 20          # at most one report per callsign in this time
+# The repeater that heard the radio goes in the APRS path as a used digipeater
+# ("EA3XYZ-9>APHBL3,ED3ZAA*,qAR,<login>"), like any RF packet an igate gates, so
+# aprs.fi shows "via ED3ZAA" and coverage maps can tell which repeater hears where.
+#   repeaters: duplex peers only (two real, different frequencies)
+#   all: hotspots too (their callsign is usually the operator's own)
+#   none: always TCPIP*, as before
+path_via: repeaters
 
 motorola:
   enabled: true

@@ -183,3 +183,42 @@ def test_without_aprs_is_login_it_only_logs() -> None:
     for vseq, pkt in _bursts(ANDORRA_LC):
         plugin.on_event(VoiceCallFrame(context=_ctx(), dmrpkt=pkt, frame_type=0, dtype_vseq=vseq))
     assert deferred == []
+
+
+# --- repeater in the APRS path (coverage maps) -------------------------------------
+def test_position_report_puts_the_repeater_in_the_path():
+    from plugin.domain.aprs import Station, position_report
+    from plugin.domain.gps_lc import GpsFix
+
+    st = Station("EA3XYZ", "9", "/", ">", "ADN")
+    line = position_report(st, GpsFix(42.5, 1.5), 2140001, None, "APHBL3", via="ED3ZAA")
+    assert line.startswith("EA3XYZ-9>APHBL3,ED3ZAA*:!")
+    assert position_report(st, GpsFix(42.5, 1.5), 2140001, None, "APHBL3").startswith(
+        "EA3XYZ-9>APHBL3,TCPIP*:!")
+
+
+def test_heard_via_follows_the_mode_and_expires():
+    from plugin.application.position_use_case import PositionUseCase, Settings
+    from plugin.domain.gps_lc import GpsFix
+
+    sent = []
+    uc = PositionUseCase(Settings(min_interval_s=0, stations={2140001: {"call": "EA3XYZ"}}), sent.append)
+    uc.heard_via(2140001, "ED3ZAA  ", True, 100.0)
+    uc.on_position(2140001, None, GpsFix(42.5, 1.5), 101.0)
+    uc.heard_via(2140001, "EA3XYZ", False, 200.0)  # a hotspot: not with "repeaters"
+    uc.on_position(2140001, None, GpsFix(42.5, 1.5), 201.0)
+    uc.heard_via(2140001, "ED3ZAA", True, 300.0)
+    uc.on_position(2140001, None, GpsFix(42.5, 1.5), 300.0 + 121)  # older than via_ttl_s
+    uc.heard_via(2140001, "bad call!", True, 500.0)
+    uc.on_position(2140001, None, GpsFix(42.5, 1.5), 501.0)
+    assert [l.split(":")[0].split(",")[1] for l in sent] == ["ED3ZAA*", "TCPIP*", "TCPIP*", "TCPIP*"]
+
+
+def test_plugin_reads_the_repeater_from_the_master_peers():
+    from plugin.application.plugin_impl import _peer_of, _text
+
+    cfg = {"SYSTEMS": {"SYSTEM-1": {"PEERS": {(214000101).to_bytes(4, "big"): {
+        "CALLSIGN": b"ED3ZAA  ", "RX_FREQ": b"430125000", "TX_FREQ": b"439525000"}}}}}
+    peer = _peer_of(cfg, "SYSTEM-1", 214000101)
+    assert _text(peer["CALLSIGN"]) == "ED3ZAA"
+    assert _peer_of(cfg, "SYSTEM-9", 1) is None and _peer_of({}, "X", 1) is None

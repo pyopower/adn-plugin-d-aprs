@@ -66,7 +66,23 @@ def _settings(config: dict[str, Any], stations: dict[int, dict[str, str]]) -> Se
         stream_ttl_s=float(voice.get("stream_ttl_s", defaults.stream_ttl_s)),
         data_dmr_ids=frozenset(int(i) for i in (voice.get("nmea_data_dmr_ids") or [])),
         stations=stations,
+        path_via=str(config.get("path_via", defaults.path_via)).lower(),
     )
+
+
+def _peer_of(server_config: dict[str, Any], system: str, peer_id: int) -> dict[str, Any] | None:
+    """The peer a frame came in through, as the MASTER registered it (RPTC)."""
+    peers = ((server_config.get("SYSTEMS") or {}).get(system) or {}).get("PEERS") or {}
+    try:
+        return peers.get(peer_id.to_bytes(4, "big")) or peers.get(peer_id)
+    except (OverflowError, AttributeError):
+        return None
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("ascii", "replace")
+    return str(value or "").strip()
 
 
 def _sms_settings(config: dict[str, Any]) -> SmsSettings:
@@ -186,6 +202,20 @@ class DAprsPlugin:
             self._ctx.defer_to_thread(self._client.close)
             self._client = None
 
+    def _note_heard_via(self, ctx: Any) -> None:
+        """Which repeater a radio's frame came in through (MASTER peers only: over OBP the
+        repeater is on another server, whose own gateway reports it)."""
+        if getattr(ctx, "system_mode", None) != "MASTER" or self._positions is None:
+            return
+        peer = _peer_of(getattr(self._ctx, "config", None) or {}, ctx.origin_system, ctx.peer_id)
+        if not peer:
+            return
+        # A repeater = two real, different frequencies (DVSwitch, BlueDV and the like
+        # register 0 or nothing, and the core would call those duplex).
+        rx, tx = _text(peer.get("RX_FREQ")).lstrip("0"), _text(peer.get("TX_FREQ")).lstrip("0")
+        duplex = bool(rx.isdigit() and tx.isdigit() and rx != tx)
+        self._positions.heard_via(ctx.src_id, _text(peer.get("CALLSIGN")), duplex, ctx.pkt_time)
+
     def on_event(self, event: object) -> None:
         if self._positions is None or self._gateway is None:
             return
@@ -196,6 +226,7 @@ class DAprsPlugin:
             hint = find_callsign(ctx.extra.get("src_callsign"))
             if hint:
                 self._callsigns[ctx.src_id] = hint
+            self._note_heard_via(ctx)
             self._gateway.on_frame(ctx.stream_id, ctx.src_id, ctx.dst_id, ctx.slot, event.dtype_vseq,
                                    event.dmrpkt, ctx.pkt_time)
             self._positions.on_data_frame(ctx.stream_id, ctx.src_id, ctx.dst_id, ctx.extra, event.dtype_vseq,
@@ -208,6 +239,7 @@ class DAprsPlugin:
             # B-E, which carry the embedded LC.
             if ctx.direction != "RX" or ctx.is_synthetic or event.frame_type != HBPF_VOICE:
                 return
+            self._note_heard_via(ctx)
             self._positions.on_frame(ctx.stream_id, ctx.src_id, ctx.extra, event.dtype_vseq, event.dmrpkt, ctx.pkt_time)
         elif isinstance(event, VoiceCallEnd):
             self._positions.on_end(event.context.stream_id, event.context.extra, event.context.pkt_time)

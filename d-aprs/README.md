@@ -96,6 +96,7 @@ and apply at once. A field also set under `stations` in the config wins over the
 | `tocall` | `APHBL3` | APRS destination (software id) |
 | `timestamp` | `none` | `none` (`!`, usual on digital), `gps` (fix time the radio sends) or `server` |
 | `min_interval_s` | `20` | At most one report per callsign in this time |
+| `path_via` | `repeaters` | Repeater that heard the radio in the APRS path (`ED3ZAA*` instead of `TCPIP*`, so APRS-IS adds `qAR`): `repeaters` (two real, different frequencies), `all` (hotspots too) or `none` |
 | `motorola.enabled` | `true` | MOTOTRBO ARS/LRRP |
 | `motorola.request_location` | `true` | Ask each registering radio for a report every 60 s |
 | `motorola.preambles` | `1` | CSBK preambles before each packet to the radio |
